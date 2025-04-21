@@ -1,11 +1,11 @@
 streamlit
-numpy
-pandas
 openai
-nltk
-spacy==3.7.1
+pandas
+numpy
 scikit-learn
 scipy
+nltk
+spacy==3.7.1
 
 # Modelos de spaCy
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
