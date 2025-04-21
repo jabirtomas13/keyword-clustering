@@ -1,14 +1,8 @@
 streamlit
-time
-json
 numpy
 pandas
-getpass
 openai
 nltk
 spacy
-nltk.corpus
-sklearn.feature_extraction.text
-sklearn.decomposition
-scipy.cluster.hierarchy
-sklearn.metrics.pairwise
+scikit-learn
+scipy
