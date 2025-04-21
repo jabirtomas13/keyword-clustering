@@ -5,55 +5,63 @@ import nltk
 import sys
 import subprocess
 import time
+import streamlit as st
+import spacy
+import en_core_web_sm
+import es_core_news_sm
+import pt_core_news_sm
 from getpass import getpass
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 
 # Check if packages are installed, install if needed
-required_packages = ['openai', 'pandas', 'numpy', 'scikit-learn', 'nltk']
+required_packages = ['openai', 'pandas', 'numpy', 'scikit-learn', 'nltk', 'spacy']
 for package in required_packages:
     try:
         __import__(package)
     except ImportError:
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', package])
 
-# Download NLTK resources (only needed once)
+# Descargar recursos de NLTK si fuera necesario (ya no usados para lematización)
 nltk.download('stopwords')
 nltk.download('wordnet')
-from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
+
+# Selector de idioma en Streamlit
+lang = st.selectbox("Selecciona un idioma para procesar:", ("en", "es", "pt"))
+
+# Cargar modelo spaCy según idioma seleccionado
+if lang == "en":
+    nlp = en_core_web_sm.load()
+elif lang == "es":
+    nlp = es_core_news_sm.load()
+elif lang == "pt":
+    nlp = pt_core_news_sm.load()
 
 # ✅ Step 1: Set up API Key securely
 from openai import OpenAI
 client = OpenAI(api_key=getpass("Enter your OpenAI API key: "))
 
 # ✅ Step 2: Load and Preprocess Dataset
-CSV_FILE = "keywords.csv" # Change the file name if yours is different
+CSV_FILE = "keywords.csv"  # Cambiá el nombre si tu archivo es otro
 df = pd.read_csv(CSV_FILE, header=None, names=["keyword"])
 
-# Remove rows where the keyword is missing and clean strings
+# Eliminar valores nulos y limpiar strings
 df = df.dropna(subset=["keyword"])
 df["keyword"] = df["keyword"].astype(str).str.strip()
 keywords = df["keyword"].tolist()
 
-# Preprocess keywords: lower-case, remove stopwords, and lemmatize
-stop_words = set(stopwords.words('english'))
-lemmatizer = WordNetLemmatizer()
-
+# Preprocesamiento con spaCy
 def preprocess_keywords(keywords):
     processed_keywords = []
     for keyword in keywords:
-        keyword = keyword.lower().strip()
-        tokens = keyword.split()
-        tokens = [lemmatizer.lemmatize(token) for token in tokens if token not in stop_words]
+        doc = nlp(keyword.lower().strip())
+        tokens = [token.lemma_ for token in doc if not token.is_stop and not token.is_punct]
         processed = ' '.join(tokens).strip()
         processed_keywords.append(processed if processed else keyword)
     return processed_keywords
 
 keywords = preprocess_keywords(keywords)
 df['keyword_processed'] = keywords
-
-# Optionally, drop rows with empty processed keywords
 df = df[df['keyword_processed'] != ""]
 
 # ✅ Step 3: Generate Embeddings using text-embedding-ada-002
@@ -71,14 +79,11 @@ def batch_embed(texts, model="text-embedding-ada-002"):
                 model=model,
                 input=batch
             )
-
-            # Use attribute access to get the embedding data
             embeddings += [item.embedding for item in response.data]
             time.sleep(SLEEP_SECONDS)
         except Exception as e:
             print(f"Error in batch {start}-{end}: {e}")
-            # Return empty embeddings for this batch and continue
-            embeddings += [[0] * 1536] * len(batch)  # Default embedding dimension for ada-002
+            embeddings += [[0] * 1536] * len(batch)
 
     return np.array(embeddings)
 
@@ -90,18 +95,18 @@ except Exception as e:
     print(f"❌ OpenAI API Error: {e}")
     exit()
 
-# ✅ Step 3b: Apply Dimensionality Reduction (PCA)
+# ✅ Step 3b: Dimensionality Reduction (PCA)
 pca = PCA(n_components=min(100, len(keyword_embeddings), keyword_embeddings.shape[1]))
 keyword_embeddings = pca.fit_transform(keyword_embeddings)
 print("✅ Dimensionality reduction applied (PCA).")
 
 # ✅ Step 4: Clustering using K-Means
-NUM_CLUSTERS = min(25, len(df))  # Ensure we don't have more clusters than data points
+NUM_CLUSTERS = min(25, len(df))
 kmeans = KMeans(n_clusters=NUM_CLUSTERS, random_state=42, n_init=10)
 clusters = kmeans.fit_predict(keyword_embeddings)
 df["cluster_id"] = clusters
 
-# ✅ Step 5: Auto-generate Cluster Names & Descriptions
+# ✅ Step 5: Generate Cluster Names & Descriptions
 def generate_cluster_name_and_description(keywords):
     prompt = f"""Given the following keywords, identify a common theme and return:
 1. A short cluster name (max 5 words)
@@ -121,7 +126,6 @@ Respond in **JSON format** like this:
             max_tokens=100
         )
         response_text = response.choices[0].message.content.strip()
-        # Remove markdown formatting if present
         response_text = response_text.replace("```json", "").replace("```", "").strip()
         data = json.loads(response_text)
         return data.get("cluster_name", "Uncategorized"), data.get("description", "No description provided.")
@@ -147,6 +151,6 @@ for cluster_num in range(NUM_CLUSTERS):
     print(f"Cluster {cluster_num}: {cluster_name} - {cluster_description}")
     time.sleep(1)
 
-# ✅ Step 6: Save the Results to CSV
+# ✅ Step 6: Save to CSV
 df.to_csv("auto_clustered_keywords.csv", index=False)
 print("✅ Clustering complete! Results saved to 'auto_clustered_keywords.csv'.")
