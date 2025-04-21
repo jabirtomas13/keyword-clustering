@@ -13,6 +13,13 @@ import pt_core_news_sm
 from getpass import getpass
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
+import subprocess
+
+@st.cache_resource
+def download_en_core_web_sm():
+    subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
+
+download_en_core_web_sm()
 
 # Check if packages are installed, install if needed
 required_packages = ['openai', 'pandas', 'numpy', 'scikit-learn', 'nltk', 'spacy']
