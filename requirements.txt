@@ -6,3 +6,7 @@ nltk
 spacy
 scikit-learn
 scipy
+
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
+https://github.com/explosion/spacy-models/releases/download/es_core_news_sm-3.7.1/es_core_news_sm-3.7.1-py3-none-any.whl
+https://github.com/explosion/spacy-models/releases/download/pt_core_news_sm-3.7.1/pt_core_news_sm-3.7.1-py3-none-any.whl
