@@ -5,10 +5,10 @@ numpy
 scikit-learn
 scipy
 nltk
-spacy==3.7.1
-thinc==8.2.1
+spacy==3.5.0
+thinc==8.1.10
 
-# Modelos de SpaCy
-https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
-https://github.com/explosion/spacy-models/releases/download/es_core_news_sm-3.7.1/es_core_news_sm-3.7.1-py3-none-any.whl
-https://github.com/explosion/spacy-models/releases/download/pt_core_news_sm-3.7.1/pt_core_news_sm-3.7.1-py3-none-any.whl
+# Modelos spaCy
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.5.0/en_core_web_sm-3.5.0-py3-none-any.whl
+https://github.com/explosion/spacy-models/releases/download/es_core_news_sm-3.5.0/es_core_news_sm-3.5.0-py3-none-any.whl
+https://github.com/explosion/spacy-models/releases/download/pt_core_news_sm-3.5.0/pt_core_news_sm-3.5.0-py3-none-any.whl
