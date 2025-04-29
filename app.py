@@ -5,6 +5,7 @@ import json
 import time
 import spacy
 import subprocess
+import sys
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from openai import OpenAI
@@ -14,7 +15,7 @@ def load_or_download_model(model_name):
     try:
         return spacy.load(model_name)
     except OSError:
-        subprocess.run(["python", "-m", "spacy", "download", model_name])
+        subprocess.run([sys.executable, "-m", "spacy", "download", model_name])
         return spacy.load(model_name)
 
 # Sidebar: API Key Input
@@ -37,8 +38,38 @@ model_map = {
     "es": "es_core_news_sm",
     "pt": "pt_core_news_sm"
 }
-
 nlp = load_or_download_model(model_map[lang])
+
+# Language-specific prompt templates
+prompt_templates = {
+    "en": """Given the following keywords, identify a common theme and return:
+1. A short cluster name (max 5 words)
+2. A one-sentence description.
+Keywords: {keywords}
+Respond in **JSON format** like this:
+{{
+  "cluster_name": "Descriptive Name",
+  "description": "Brief explanation of the category."
+}}""",
+    "es": """Dadas las siguientes palabras clave, identifica un tema común y devuelve:
+1. Un nombre corto para el grupo (máx. 5 palabras)
+2. Una breve descripción en una oración.
+Palabras clave: {keywords}
+Responde en formato **JSON** así:
+{{
+  "cluster_name": "Nombre descriptivo",
+  "description": "Breve explicación de la categoría."
+}}""",
+    "pt": """Dadas as palavras-chave a seguir, identifique um tema comum e retorne:
+1. Um nome curto para o grupo (máx. 5 palavras)
+2. Uma breve descrição em uma frase.
+Palavras-chave: {keywords}
+Responda no formato **JSON** assim:
+{{
+  "cluster_name": "Nome descritivo",
+  "description": "Breve explicação da categoria."
+}}"""
+}
 
 # Main UI
 st.title("Keyword Clustering Tool")
@@ -47,8 +78,6 @@ uploaded_file = st.file_uploader("Upload a CSV file with keywords", type=["csv"]
 
 if uploaded_file:
     df = pd.read_csv(uploaded_file, header=None, names=["keyword"])
-
-    # Preprocessing
     df = df.dropna(subset=["keyword"])
     df["keyword"] = df["keyword"].astype(str).str.strip()
 
@@ -96,7 +125,7 @@ if uploaded_file:
         st.error(f"OpenAI API Error: {e}")
         st.stop()
 
-    # Dimensionality Reduction (PCA)
+    # Dimensionality Reduction
     pca = PCA(n_components=min(100, len(keyword_embeddings), keyword_embeddings.shape[1]))
     keyword_embeddings = pca.fit_transform(keyword_embeddings)
 
@@ -108,16 +137,7 @@ if uploaded_file:
 
     # Generate Cluster Names
     def generate_cluster_name_and_description(keywords):
-        prompt = f"""Given the following keywords, identify a common theme and return:
-1. A short cluster name (max 5 words)
-2. A one-sentence description.
-Keywords: {', '.join(keywords[:25])}
-Respond in **JSON format** like this:
-{{
-  "cluster_name": "Descriptive Name",
-  "description": "Brief explanation of the category."
-}}
-"""
+        prompt = prompt_templates[lang].format(keywords=', '.join(keywords[:25]))
         try:
             response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
@@ -145,10 +165,9 @@ Respond in **JSON format** like this:
         df.loc[df['cluster_id'] == cluster_num, 'cluster_name'] = cluster_name
         df.loc[df['cluster_id'] == cluster_num, 'cluster_description'] = cluster_description
 
-    # Display Results
+    # Display and download
     st.dataframe(df)
 
-    # Download link
     csv = df.to_csv(index=False).encode('utf-8')
     st.download_button(
         label="Download Clustered Keywords as CSV",
