@@ -81,6 +81,26 @@ if uploaded_file:
     df = df.dropna(subset=["keyword"])
     df["keyword"] = df["keyword"].astype(str).str.strip()
 
+    # Cluster selection UI
+    st.subheader("Cluster Configuration")
+    cluster_mode = st.radio(
+        "How many clusters do you want to generate?",
+        ("Automatic (recommended)", "Manual selection"),
+        help="Automatic mode will determine the optimal number of clusters based on your data"
+    )
+    
+    if cluster_mode == "Manual selection":
+        max_possible_clusters = min(50, len(df))
+        num_clusters_input = st.slider(
+            "Select number of clusters:",
+            min_value=2,
+            max_value=max_possible_clusters,
+            value=min(25, max_possible_clusters),
+            help=f"You can create between 2 and {max_possible_clusters} clusters"
+        )
+    else:
+        num_clusters_input = None
+
     def preprocess_keywords(keywords):
         processed_keywords = []
         for keyword in keywords:
@@ -129,8 +149,17 @@ if uploaded_file:
     pca = PCA(n_components=min(100, len(keyword_embeddings), keyword_embeddings.shape[1]))
     keyword_embeddings = pca.fit_transform(keyword_embeddings)
 
+    # Determine number of clusters
+    if num_clusters_input is None:
+        # Automatic mode: use heuristic based on dataset size
+        NUM_CLUSTERS = min(25, max(5, len(df) // 20))
+        st.info(f"🤖 Automatic mode: Creating {NUM_CLUSTERS} clusters based on your {len(df)} keywords")
+    else:
+        # Manual mode: use user selection
+        NUM_CLUSTERS = num_clusters_input
+        st.info(f"✋ Manual mode: Creating {NUM_CLUSTERS} clusters as requested")
+
     # Clustering
-    NUM_CLUSTERS = min(25, len(df))
     kmeans = KMeans(n_clusters=NUM_CLUSTERS, random_state=42, n_init=10)
     clusters = kmeans.fit_predict(keyword_embeddings)
     df["cluster_id"] = clusters
@@ -164,6 +193,16 @@ if uploaded_file:
             cluster_name, cluster_description = generate_cluster_name_and_description(cluster_keywords)
         df.loc[df['cluster_id'] == cluster_num, 'cluster_name'] = cluster_name
         df.loc[df['cluster_id'] == cluster_num, 'cluster_description'] = cluster_description
+
+    # Display summary statistics
+    st.subheader("Clustering Results")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Total Keywords", len(df))
+    with col2:
+        st.metric("Total Clusters", NUM_CLUSTERS)
+    with col3:
+        st.metric("Avg Keywords/Cluster", f"{len(df)/NUM_CLUSTERS:.1f}")
 
     # Display and download
     st.dataframe(df)
