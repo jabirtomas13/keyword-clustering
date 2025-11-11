@@ -1,216 +1,340 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Keyword Clustering App (ES/EN/PT) – GitHub-ready
+------------------------------------------------
+- Robust CSV loading
+- Cross-language normalization (es/en/pt)
+- KMeans clustering
+- Optional spaCy embeddings (falls back to TF-IDF)
+- Cluster naming via OpenAI (optional)
+"""
+import os
+import re
+import unicodedata
+import json
+from typing import List, Optional, Tuple
+
 import streamlit as st
 import pandas as pd
 import numpy as np
-import json
-import time
-import spacy
-import subprocess
-import sys
-from sklearn.cluster import KMeans
-from sklearn.decomposition import PCA
-from openai import OpenAI
 
-# Helper function to load or download spaCy models
-def load_or_download_model(model_name):
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+from sklearn.decomposition import PCA
+
+# --- Optional deps (lazy import) ---
+def _lazy_import_spacy():
+    try:
+        import spacy
+        return spacy
+    except Exception:
+        return None
+
+def _lazy_import_openai():
+    try:
+        from openai import OpenAI
+        return OpenAI
+    except Exception:
+        return None
+
+# ------------------------
+# Normalization utilities
+# ------------------------
+_SMARTS = {
+    "\u2018": "'", "\u2019": "'", "\u201B": "'",
+    "\u201C": '"', "\u201D": '"',
+    "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-",
+    "\u00A0": " ",  # non-breaking space
+}
+_SMARTS_TRANS = str.maketrans(_SMARTS)
+
+# Basic emoji/pictograph range
+_EMOJI_RE = re.compile(
+    "[\U0001F300-\U0001F6FF\U0001F700-\U0001FAFF\U00002700-\U000027BF\U0001F900-\U0001F9FF]"
+)
+# Keep letters/numbers/spaces, hyphens, apostrophes
+_ALLOWED_RE = re.compile(r"[^a-z0-9\-\' ]+")
+_MULTI_SPACE_RE = re.compile(r"\s+")
+
+def strip_diacritics(text: str) -> str:
+    norm = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in norm if not unicodedata.combining(ch))
+
+def normalize_keyword(s: str) -> str:
+    if s is None:
+        return ""
+    s = str(s).strip()
+    if not s:
+        return ""
+    s = s.translate(_SMARTS_TRANS)
+    s = _EMOJI_RE.sub(" ", s)
+    s = strip_diacritics(s)
+    s = s.lower()
+    s = _ALLOWED_RE.sub(" ", s)
+    s = re.sub(r"\b[-']+|[-']+\b", " ", s)
+    s = _MULTI_SPACE_RE.sub(" ", s).strip()
+    return s
+
+def normalize_series(series: pd.Series) -> pd.Series:
+    return series.astype("string").fillna("").map(normalize_keyword)
+
+# ------------------------
+# Embeddings
+# ------------------------
+def build_spacy_pipeline(lang_choice: str):
+    spacy = _lazy_import_spacy()
+    if not spacy:
+        return None
+
+    model_map = {
+        "auto-multi (xx)": "xx_ent_wiki_sm",
+        "english (en)": "en_core_web_md",
+        "español (es)": "es_core_news_md",
+        "português (pt)": "pt_core_news_md",
+    }
+    model_name = model_map.get(lang_choice, "xx_ent_wiki_sm")
     try:
         return spacy.load(model_name)
-    except OSError:
-        subprocess.run([sys.executable, "-m", "spacy", "download", model_name])
-        return spacy.load(model_name)
+    except Exception:
+        # try to download on the fly
+        try:
+            import subprocess, sys
+            subprocess.run([sys.executable, "-m", "spacy", "download", model_name], check=True)
+            return spacy.load(model_name)
+        except Exception:
+            return None
 
-# Sidebar: API Key Input
-st.sidebar.header("Settings")
-api_key = st.sidebar.text_input("Enter your OpenAI API Key:", type="password")
+def embed_spacy(texts: List[str], nlp) -> np.ndarray:
+    vecs = []
+    for t in texts:
+        doc = nlp(t)
+        vecs.append(doc.vector)
+    arr = np.vstack(vecs)
+    # If zero vectors (small models), fallback to TF-IDF later
+    return arr
 
-if not api_key:
-    st.error("Please provide your OpenAI API key in the sidebar.")
-    st.stop()
+def embed_tfidf(texts: List[str]) -> Tuple[np.ndarray, TfidfVectorizer]:
+    vec = TfidfVectorizer(ngram_range=(1,2), min_df=1)
+    X = vec.fit_transform(texts)
+    return X, vec
 
-# Initialize OpenAI client
-client = OpenAI(api_key=api_key)
+# ------------------------
+# Clustering
+# ------------------------
+def kmeans_cluster(X, k: int, random_state: int = 42) -> np.ndarray:
+    if hasattr(X, "toarray"):
+        # sparse matrix
+        model = KMeans(n_clusters=k, n_init=10, random_state=random_state)
+        labels = model.fit_predict(X)
+    else:
+        model = KMeans(n_clusters=k, n_init=10, random_state=random_state)
+        labels = model.fit_predict(X)
+    return labels
 
-# Sidebar: Language selection
-lang = st.sidebar.selectbox("Select a language for processing:", ("en", "es", "pt"))
+def try_auto_k(X, k_min=2, k_max=12) -> int:
+    best_k, best_score = None, -1
+    ks = list(range(k_min, max(k_min+1, k_max+1)))
+    for k in ks:
+        try:
+            labels = kmeans_cluster(X, k)
+            score = silhouette_score(X if hasattr(X, "toarray") else X, labels, metric="cosine")
+            if score > best_score:
+                best_k, best_score = k, score
+        except Exception:
+            continue
+    return best_k or 5
 
-# Load spaCy model based on selected language
-model_map = {
-    "en": "en_core_web_sm",
-    "es": "es_core_news_sm",
-    "pt": "pt_core_news_sm"
-}
-nlp = load_or_download_model(model_map[lang])
+# ------------------------
+# OpenAI naming (optional)
+# ------------------------
+def name_clusters_with_openai(df: pd.DataFrame, api_key: str, lang: str) -> pd.DataFrame:
+    OpenAI = _lazy_import_openai()
+    if not OpenAI:
+        st.warning("Paquete openai no disponible. Omite nombres de clúster.")
+        return df
+    client = OpenAI(api_key=api_key)
 
-# Language-specific prompt templates
-prompt_templates = {
-    "en": """Given the following keywords, identify a common theme and return:
-1. A short cluster name (max 5 words)
-2. A one-sentence description.
+    prompts = {
+        "en": """Given the following keywords, identify a common theme and return:
+1) A short cluster name (max. 5 words)
+2) A one-sentence description.
 Keywords: {keywords}
-Respond in **JSON format** like this:
+Respond in **JSON** like:
 {{
-  "cluster_name": "Descriptive Name",
+  "cluster_name": "Descriptive name",
   "description": "Brief explanation of the category."
 }}""",
-    "es": """Dadas las siguientes palabras clave, identifica un tema común y devuelve:
-1. Un nombre corto para el grupo (máx. 5 palabras)
-2. Una breve descripción en una oración.
+        "es": """Dadas las siguientes palabras clave, identifica un tema común y devuelve:
+1) Un nombre corto para el grupo (máx. 5 palabras)
+2) Una breve descripción en una oración.
 Palabras clave: {keywords}
-Responde en formato **JSON** así:
+Responde en **JSON** así:
 {{
   "cluster_name": "Nombre descriptivo",
   "description": "Breve explicación de la categoría."
 }}""",
-    "pt": """Dadas as palavras-chave a seguir, identifique um tema comum e retorne:
-1. Um nome curto para o grupo (máx. 5 palavras)
-2. Uma breve descrição em uma frase.
+        "pt": """Dadas as palavras-chave a seguir, identifique um tema comum e retorne:
+1) Um nome curto para o grupo (máx. 5 palavras)
+2) Uma breve descrição em uma frase.
 Palavras-chave: {keywords}
-Responda no formato **JSON** assim:
+Responda em **JSON** assim:
 {{
   "cluster_name": "Nome descritivo",
   "description": "Breve explicação da categoria."
-}}"""
-}
-
-# Main UI
-st.title("Keyword Clustering Tool")
-
-uploaded_file = st.file_uploader("Upload a CSV file with keywords", type=["csv"])
-
-if uploaded_file:
-    df = pd.read_csv(uploaded_file, header=None, names=["keyword"])
-    df = df.dropna(subset=["keyword"])
-    df["keyword"] = df["keyword"].astype(str).str.strip()
-
-    # Cluster selection UI
-    st.subheader("Cluster Configuration")
-    cluster_mode = st.radio(
-        "How many clusters do you want to generate?",
-        ("Automatic (recommended)", "Manual selection"),
-        help="Automatic mode will determine the optimal number of clusters based on your data"
-    )
-    
-    if cluster_mode == "Manual selection":
-        max_possible_clusters = min(50, len(df))
-        num_clusters_input = st.slider(
-            "Select number of clusters:",
-            min_value=2,
-            max_value=max_possible_clusters,
-            value=min(25, max_possible_clusters),
-            help=f"You can create between 2 and {max_possible_clusters} clusters"
-        )
-    else:
-        num_clusters_input = None
-
-    def preprocess_keywords(keywords):
-        processed_keywords = []
-        for keyword in keywords:
-            doc = nlp(keyword.lower().strip())
-            tokens = [token.lemma_ for token in doc if not token.is_stop and not token.is_punct]
-            processed = ' '.join(tokens).strip()
-            processed_keywords.append(processed if processed else keyword)
-        return processed_keywords
-
-    st.info("Processing keywords...")
-    keywords = preprocess_keywords(df["keyword"].tolist())
-    df['keyword_processed'] = keywords
-    df = df[df['keyword_processed'] != ""]
-
-    # Generate embeddings
-    st.info("Generating embeddings with OpenAI...")
-
-    BATCH_SIZE = 100
-    SLEEP_SECONDS = 1
-
-    def batch_embed(texts, model="text-embedding-ada-002"):
-        embeddings = []
-        for start in range(0, len(texts), BATCH_SIZE):
-            end = start + BATCH_SIZE
-            batch = texts[start:end]
-            try:
-                response = client.embeddings.create(
-                    model=model,
-                    input=batch
-                )
-                embeddings += [item.embedding for item in response.data]
-                time.sleep(SLEEP_SECONDS)
-            except Exception as e:
-                st.error(f"Error embedding batch {start}-{end}: {e}")
-                embeddings += [[0] * 1536] * len(batch)
-        return np.array(embeddings)
-
-    try:
-        keyword_embeddings = batch_embed(df['keyword_processed'].tolist())
-        st.success(f"Generated embeddings for {len(keyword_embeddings)} keywords.")
-    except Exception as e:
-        st.error(f"OpenAI API Error: {e}")
-        st.stop()
-
-    # Dimensionality Reduction
-    pca = PCA(n_components=min(100, len(keyword_embeddings), keyword_embeddings.shape[1]))
-    keyword_embeddings = pca.fit_transform(keyword_embeddings)
-
-    # Determine number of clusters
-    if num_clusters_input is None:
-        # Automatic mode: use heuristic based on dataset size
-        NUM_CLUSTERS = min(25, max(5, len(df) // 20))
-        st.info(f"🤖 Automatic mode: Creating {NUM_CLUSTERS} clusters based on your {len(df)} keywords")
-    else:
-        # Manual mode: use user selection
-        NUM_CLUSTERS = num_clusters_input
-        st.info(f"✋ Manual mode: Creating {NUM_CLUSTERS} clusters as requested")
-
-    # Clustering
-    kmeans = KMeans(n_clusters=NUM_CLUSTERS, random_state=42, n_init=10)
-    clusters = kmeans.fit_predict(keyword_embeddings)
-    df["cluster_id"] = clusters
-
-    # Generate Cluster Names
-    def generate_cluster_name_and_description(keywords):
-        prompt = prompt_templates[lang].format(keywords=', '.join(keywords[:25]))
+}}""",
+    }
+    # Simple language heuristic from UI choice
+    sys_lang = {"Auto": "en", "English": "en", "Español": "es", "Português": "pt"}.get(lang, "en")
+    results = []
+    for cl_id, group in df.groupby("cluster_id"):
+        kws = group["keyword_original"].head(15).tolist()
+        kw_blob = ", ".join(kws)
+        prompt = prompts[sys_lang].format(keywords=kw_blob)
         try:
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
+            chat = client.chat.completions.create(
+                model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=100
+                temperature=0.2,
             )
-            response_text = response.choices[0].message.content.strip()
-            response_text = response_text.replace("```json", "").replace("```", "").strip()
-            data = json.loads(response_text)
-            return data.get("cluster_name", "Uncategorized"), data.get("description", "No description provided.")
-        except Exception as e:
-            st.error(f"Error generating cluster name: {e}")
-            return "Uncategorized", "Error occurred."
+            content = chat.choices[0].message.content
+            # Try to parse JSON
+            data = {}
+            try:
+                data = json.loads(content)
+            except Exception:
+                # crude extraction of JSON-like
+                import re as _re
+                m = _re.search(r"\{.*\}", content, _re.S)
+                if m:
+                    data = json.loads(m.group(0))
+            cluster_name = data.get("cluster_name") or f"Cluster {cl_id}"
+            description = data.get("description") or ""
+        except Exception:
+            cluster_name, description = f"Cluster {cl_id}", ""
+        results.append((cl_id, cluster_name, description))
 
-    df['cluster_name'] = ''
-    df['cluster_description'] = ''
+    name_df = pd.DataFrame(results, columns=["cluster_id", "cluster_name", "cluster_description"])
+    return df.merge(name_df, on="cluster_id", how="left")
 
-    for cluster_num in range(NUM_CLUSTERS):
-        cluster_keywords = df[df['cluster_id'] == cluster_num]['keyword_processed'].tolist()
-        if len(cluster_keywords) < 5:
-            cluster_name, cluster_description = "Uncategorized", "Too few keywords to determine"
-        else:
-            cluster_name, cluster_description = generate_cluster_name_and_description(cluster_keywords)
-        df.loc[df['cluster_id'] == cluster_num, 'cluster_name'] = cluster_name
-        df.loc[df['cluster_id'] == cluster_num, 'cluster_description'] = cluster_description
+# ------------------------
+# UI
+# ------------------------
+st.set_page_config(page_title="Keyword Clustering (ES/EN/PT)", layout="wide")
 
-    # Display summary statistics
-    st.subheader("Clustering Results")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Total Keywords", len(df))
-    with col2:
-        st.metric("Total Clusters", NUM_CLUSTERS)
-    with col3:
-        st.metric("Avg Keywords/Cluster", f"{len(df)/NUM_CLUSTERS:.1f}")
+st.title("🔎 Keyword Clustering (ES · EN · PT)")
+st.caption("Carga tu CSV, normalizamos los términos y agrupamos por similitud. Listo para GitHub/Streamlit Cloud.")
 
-    # Display and download
-    st.dataframe(df)
-
-    csv = df.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label="Download Clustered Keywords as CSV",
-        data=csv,
-        file_name='auto_clustered_keywords.csv',
-        mime='text/csv',
+with st.sidebar:
+    st.header("⚙️ Configuración")
+    lang_choice = st.selectbox(
+        "Idioma para spaCy (solo si eliges 'spaCy vectors')",
+        ["auto-multi (xx)", "english (en)", "español (es)", "português (pt)"],
+        index=0,
     )
+    embed_method = st.radio("Método de vectores", ["TF-IDF (rápido)", "spaCy vectors"], index=0)
+    auto_k = st.checkbox("Elegir K automáticamente (silhouette)", value=True)
+    k = st.slider("Número de clústeres (K)", 2, 30, 8)
+    do_dimred = st.checkbox("PCA 2D para visualización", value=True)
+    use_openai = st.checkbox("Nombrar clústeres con OpenAI", value=False)
+    if use_openai:
+        openai_key = st.text_input("OPENAI_API_KEY", type="password", value=os.getenv("OPENAI_API_KEY", ""))
+    else:
+        openai_key = ""
+
+st.markdown("### 1) Sube tu CSV de keywords")
+uploaded = st.file_uploader("CSV con columna de keywords", type=["csv"])
+
+if uploaded is None:
+    st.info("💡 Consejo: la columna debe llamarse `keyword`, `keywords`, `query` o `kw` (o será la primera columna).")
+    st.stop()
+
+# Read CSV robustly
+try:
+    df = pd.read_csv(uploaded, encoding="utf-8-sig", on_bad_lines="skip", dtype=str)
+except Exception:
+    uploaded.seek(0)
+    df = pd.read_csv(uploaded, encoding="latin-1", on_bad_lines="skip", dtype=str)
+
+df = df.fillna("")
+possible = [c for c in df.columns if c.lower() in {"keyword", "keywords", "query", "kw"}]
+kw_col = possible[0] if possible else df.columns[0]
+
+# Keep original and normalized
+df["keyword_original"] = df[kw_col].astype("string")
+df["keyword_norm"] = normalize_series(df[kw_col])
+df = df[df["keyword_norm"].str.len() > 0].drop_duplicates(subset=["keyword_norm"]).reset_index(drop=True)
+
+st.success(f"✅ CSV cargado. Usando columna: **{kw_col}** · Filas: **{len(df)}**")
+with st.expander("Ver muestra de normalización", expanded=False):
+    st.dataframe(df[["keyword_original", "keyword_norm"]].head(20))
+
+# Build vectors
+texts = df["keyword_norm"].tolist()
+
+X = None
+vectorizer = None
+nlp = None
+
+if embed_method == "spaCy vectors":
+    nlp = build_spacy_pipeline(lang_choice)
+    if nlp is not None and nlp.vocab.vectors.shape[0] > 0:
+        with st.spinner("Calculando vectores de spaCy..."):
+            X = embed_spacy(texts, nlp)
+            # Some spaCy small models yield mostly-zero vectors; check variance
+            if np.allclose(X, 0):
+                st.warning("Los vectores de este modelo parecen nulos. Cambio a TF-IDF.")
+                X, vectorizer = embed_tfidf(texts)
+    else:
+        st.warning("No se pudo cargar un modelo de spaCy válido. Uso TF-IDF.")
+        X, vectorizer = embed_tfidf(texts)
+else:
+    X, vectorizer = embed_tfidf(texts)
+
+# Decide K
+if auto_k:
+    with st.spinner("Buscando K óptimo (silhouette)..."):
+        k_auto = try_auto_k(X, k_min=2, k_max=min(12, max(3, len(df)//5)))
+        if k_auto:
+            k = k_auto
+st.write(f"**K seleccionado:** {k}")
+
+# Cluster
+labels = kmeans_cluster(X, k)
+df["cluster_id"] = labels
+
+# Optional PCA visualization
+if do_dimred:
+    st.markdown("### 2) Visualización 2D (PCA)")
+    try:
+        if hasattr(X, "toarray"):
+            X_dense = X.toarray()
+        else:
+            X_dense = X
+        pca = PCA(n_components=2, random_state=42)
+        coords = pca.fit_transform(X_dense)
+        viz = pd.DataFrame({"x": coords[:,0], "y": coords[:,1], "cluster": df["cluster_id"], "keyword": df["keyword_original"]})
+        st.scatter_chart(viz, x="x", y="y", color="cluster", size=None)
+    except Exception as e:
+        st.warning(f"No se pudo proyectar a 2D: {e}")
+
+# Optional OpenAI naming
+if use_openai and openai_key:
+    with st.spinner("Nombrando clústeres con OpenAI..."):
+        df = name_clusters_with_openai(df, api_key=openai_key, lang="Auto")
+else:
+    df["cluster_name"] = ""
+    df["cluster_description"] = ""
+
+# Output
+st.markdown("### 3) Resultado")
+order_cols = ["keyword_original", "keyword_norm", "cluster_id", "cluster_name", "cluster_description"]
+extra_cols = [c for c in df.columns if c not in order_cols]
+df = df[order_cols + extra_cols]
+st.dataframe(df)
+
+csv_bytes = df.to_csv(index=False).encode("utf-8")
+st.download_button("⬇️ Descargar CSV clusterizado", data=csv_bytes, file_name="clustered_keywords.csv", mime="text/csv")
+
+st.caption("Hecho con ❤️ para es/en/pt · Normalización robusta para evitar fallos por caracteres/acentos.")
