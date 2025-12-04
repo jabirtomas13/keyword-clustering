@@ -4,8 +4,9 @@
 Keyword Clustering App – SEO & EEAT High-End UI Edition
 -------------------------------------------------------
 Integración completa:
-1. UX/UI Moderna (CSS, Tabs, Status Containers).
+1. UX/UI Moderna (CSS corregido para legibilidad).
 2. Lógica SEO Avanzada (SBERT Embeddings, Gemini EEAT Prompt).
+3. Ajustes de visualización en tablas.
 """
 import os
 import re
@@ -34,11 +35,30 @@ st.set_page_config(
 # --- ESTILOS CSS PERSONALIZADOS ---
 st.markdown("""
     <style>
+    /* Fondo general */
     .main { background-color: #f8f9fa; }
+    
+    /* Botones primarios */
     .stButton>button { border-radius: 8px; font-weight: 600; text-transform: none; padding: 0.5rem 1rem; }
     .stButton>button[kind="primary"] { background-color: #ff4b4b; border: none; box-shadow: 0 4px 14px 0 rgba(255, 75, 75, 0.39); }
+    
+    /* Tipografía */
     h1, h2, h3 { font-family: 'Inter', sans-serif; color: #0e1117; }
-    .stMetric { background-color: white; padding: 15px; border-radius: 10px; border: 1px solid #e0e0e0; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+    
+    /* Tarjetas de Métricas (Fix de legibilidad) */
+    .stMetric { 
+        background-color: #ffffff !important; 
+        padding: 15px; 
+        border-radius: 10px; 
+        border: 1px solid #e0e0e0; 
+        box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }
+    /* Forzar color de texto oscuro dentro de las métricas para evitar blanco sobre blanco */
+    [data-testid="stMetricValue"], [data-testid="stMetricLabel"] {
+        color: #31333F !important;
+    }
+    
+    /* Status widget */
     div[data-testid="stStatusWidget"] { border-radius: 10px; }
     </style>
 """, unsafe_allow_html=True)
@@ -210,7 +230,7 @@ def name_clusters_seo_mode(df: pd.DataFrame, api_key: str, lang: str) -> pd.Data
         Keywords: {keywords}
 
         Responde SOLO JSON:
-        1. "cluster_name": Título H1 optimizado (máx 6 palabras).
+        1. "cluster_name": Título de Pilar optimizado (máx 6 palabras).
         2. "user_intent": Intención exacta (ej: 'Informacional - Tutorial', 'Transaccional - Compra').
         3. "content_angle": Frase corta con el enfoque único para ganar autoridad.
         """,
@@ -221,7 +241,7 @@ def name_clusters_seo_mode(df: pd.DataFrame, api_key: str, lang: str) -> pd.Data
         Keywords: {keywords}
 
         Return ONLY JSON:
-        1. "cluster_name": Optimized H1 Title (max 6 words).
+        1. "cluster_name": Optimized Pillar Title (max 6 words).
         2. "user_intent": Specific intent (e.g., 'Informational - How-to', 'Transactional - Buy').
         3. "content_angle": Short sentence on the unique authority angle.
         """
@@ -424,7 +444,7 @@ if uploaded_file:
             st.dataframe(
                 final_df,
                 column_config={
-                    "cluster_name": st.column_config.TextColumn("Pilar de Contenido (H1)", help="Título optimizado para el cluster"),
+                    "cluster_name": st.column_config.TextColumn("Pilar de Contenido", help="Tema principal del grupo"),
                     "user_intent": st.column_config.TextColumn("Intención de Usuario", width="medium"),
                     "content_angle": st.column_config.TextColumn("Ángulo de Autoridad (EEAT)", width="large"),
                     "keyword_original": st.column_config.ListColumn("Keywords Agrupadas")
