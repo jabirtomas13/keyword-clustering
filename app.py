@@ -7,12 +7,13 @@ Keyword Clustering App (ES/EN/PT) – GitHub-ready
 - Normalización multilenguaje (es/en/pt)
 - Clustering KMeans con detección de K (Silhouette)
 - Embeddings opcionales con spaCy (fallback a TF-IDF)
-- Nombres de clústeres con Google Gemini (Integración corregida)
+- Nombres de clústeres con Google Gemini (Integración corregida + Rate Limit Fix)
 """
 import os
 import re
 import unicodedata
 import json
+import time  # <--- NUEVO: Necesario para controlar la velocidad de peticiones
 from typing import List, Optional, Tuple
 
 import streamlit as st
@@ -175,7 +176,7 @@ def try_auto_k(X, k_min=2, k_max=12) -> int:
     return best_k or 5
 
 # ------------------------
-# Nombrado con Gemini (Opcional)
+# Nombrado con Gemini (Opcional - CON CONTROL DE RATE LIMIT)
 # ------------------------
 def name_clusters_with_gemini(df: pd.DataFrame, api_key: str, lang: str) -> pd.DataFrame:
     """Usa la API de Gemini para nombrar clústeres."""
@@ -224,7 +225,7 @@ Responda estritamente no formato **JSON** solicitado.
     }}
     La respuesta debe ser en idioma '{sys_lang}'."""
 
-    # --- CORRECCIÓN APLICADA AQUÍ (Configuración Gemini) ---
+    # Configuración Gemini
     generation_config = {
         "response_mime_type": "application/json",
         "temperature": 0.2,
@@ -236,39 +237,70 @@ Responda estritamente no formato **JSON** solicitado.
             },
             "required": ["cluster_name", "description"]
         },
-        # La instrucción del sistema va DENTRO de config en el nuevo SDK
         "system_instruction": system_instruction
     }
-    # -------------------------------------------------------
 
     results = []
     
-    # Procesar clústeres
-    for cl_id, group in df.groupby("cluster_id"):
+    # Agrupar datos
+    groups = list(df.groupby("cluster_id"))
+    total_clusters = len(groups)
+    
+    # Barra de progreso para el usuario
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    # Procesar clústeres con RATE LIMITING
+    for i, (cl_id, group) in enumerate(groups):
+        
+        # --- CONTROL DE VELOCIDAD (RATE LIMIT) ---
+        # Esperar 4 segundos entre llamadas para respetar el límite gratuito (~15 req/min)
+        if i > 0:
+            time.sleep(4)
+        # -----------------------------------------
+
+        # Actualizar progreso
+        progress_bar.progress((i + 1) / total_clusters)
+        status_text.text(f"Nombrando clúster {cl_id} ({i+1}/{total_clusters})...")
+
         kws = group["keyword_original"].head(15).tolist()
         kw_blob = ", ".join(kws)
         prompt = prompts[sys_lang].format(keywords=kw_blob)
 
-        try:
-            # Llamada a Gemini
-            response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=[prompt],
-                config=generation_config
-                # NOTA: system_instruction ya no se pasa aquí
-            )
+        # Lógica de reintento simple
+        max_retries = 1
+        cluster_name = f"Cluster {cl_id}"
+        description = "Error al generar descripción"
 
-            content = response.text
-            data = json.loads(content)
+        for attempt in range(max_retries + 1):
+            try:
+                response = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=[prompt],
+                    config=generation_config
+                )
+                content = response.text
+                data = json.loads(content)
+                cluster_name = data.get("cluster_name") or f"Cluster {cl_id}"
+                description = data.get("description") or ""
+                break # Éxito, salir del loop de reintentos
 
-            cluster_name = data.get("cluster_name") or f"Cluster {cl_id}"
-            description = data.get("description") or ""
-
-        except Exception as e:
-            st.error(f"Error al nombrar el Clúster {cl_id} con Gemini: {e}")
-            cluster_name, description = f"Cluster {cl_id}", "Error al generar la descripción."
+            except Exception as e:
+                err_str = str(e)
+                if "429" in err_str and attempt < max_retries:
+                    # Si es error de cuota (429), esperar más tiempo y reintentar una vez
+                    status_text.text(f"⏳ Límite de velocidad alcanzado en Clúster {cl_id}. Esperando 10s...")
+                    time.sleep(10)
+                    continue
+                else:
+                    # Si es otro error o ya se reintentó
+                    print(f"Error final en cluster {cl_id}: {e}")
+                    break
 
         results.append((cl_id, cluster_name, description))
+
+    status_text.empty()
+    progress_bar.empty()
 
     name_df = pd.DataFrame(results, columns=["cluster_id", "cluster_name", "cluster_description"])
     return df.merge(name_df, on="cluster_id", how="left")
@@ -377,14 +409,14 @@ if do_dimred:
 
 # Nombrado con Gemini
 if use_gemini and gemini_key:
-    with st.spinner("Nombrando clústeres con Gemini..."):
-        df = name_clusters_with_gemini(df, api_key=gemini_key, lang=lang_choice)
+    # NOTA: Ya no usamos spinner aquí porque la función tiene su propia barra de progreso
+    df = name_clusters_with_gemini(df, api_key=gemini_key, lang=lang_choice)
 else:
     # Inicializar vacíos si no se usa Gemini
     df["cluster_name"] = ""
     df["cluster_description"] = ""
 
-# --- 🛡️ CORRECCIÓN APLICADA AQUÍ (BLINDAJE) ---
+# --- 🛡️ CORRECCIÓN APLICADA (BLINDAJE) ---
 # Si Gemini falló o devolvió el DF original, asegurarse de que las columnas existan
 if "cluster_name" not in df.columns:
     df["cluster_name"] = "Sin nombre (Gemini omitido)"
