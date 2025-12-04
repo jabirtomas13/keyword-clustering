@@ -3,11 +3,11 @@
 """
 Keyword Clustering App (ES/EN/PT) – GitHub-ready
 ------------------------------------------------
-- Robust CSV loading
-- Cross-language normalization (es/en/pt)
-- KMeans clustering
-- Optional spaCy embeddings (falls back to TF-IDF)
-- Cluster naming via Google Gemini (new integration)
+- Carga robusta de CSV
+- Normalización multilenguaje (es/en/pt)
+- Clustering KMeans con detección de K (Silhouette)
+- Embeddings opcionales con spaCy (fallback a TF-IDF)
+- Nombres de clústeres con Google Gemini (Integración corregida)
 """
 import os
 import re
@@ -24,9 +24,11 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.decomposition import PCA
 
-# --- Optional deps (lazy import) ---
+# ------------------------
+# Imports perezosos (Lazy Imports)
+# ------------------------
 def _lazy_import_spacy():
-    """Tries to import the spacy library."""
+    """Intenta importar la librería spaCy."""
     try:
         import spacy
         return spacy
@@ -34,47 +36,45 @@ def _lazy_import_spacy():
         return None
 
 def _lazy_import_gemini():
-    """Tries to import the google-genai library."""
+    """Intenta importar la librería google-genai."""
     try:
         from google import genai
-        # Ensure that the necessary components are available (e.g., Client)
+        # Verificar que tenga el cliente
         if hasattr(genai, 'Client'):
             return genai
         return None
     except ImportError:
-        # Fallback for common ImportError
         return None
     except Exception:
-        # Catch all other exceptions
         return None
 
 
 # ------------------------
-# Normalization utilities
+# Utilidades de Normalización
 # ------------------------
 _SMARTS = {
     "\u2018": "'", "\u2019": "'", "\u201B": "'",
     "\u201C": '"', "\u201D": '"',
     "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-",
-    "\u00A0": " ",  # non-breaking space
+    "\u00A0": " ",  # espacio sin ruptura
 }
 _SMARTS_TRANS = str.maketrans(_SMARTS)
 
-# Basic emoji/pictograph range
+# Rango básico de emojis/pictogramas
 _EMOJI_RE = re.compile(
     "[\U0001F300-\U0001F6FF\U0001F700-\U0001FAFF\U00002700-\U000027BF\U0001F900-\U0001F9FF]"
 )
-# Keep letters/numbers/spaces, hyphens, apostrophes
+# Mantener letras/números/espacios, guiones, apóstrofes
 _ALLOWED_RE = re.compile(r"[^a-z0-9\-\' ]+")
 _MULTI_SPACE_RE = re.compile(r"\s+")
 
 def strip_diacritics(text: str) -> str:
-    """Removes diacritics (accents) from text."""
+    """Elimina tildes y diacríticos del texto."""
     norm = unicodedata.normalize("NFKD", text)
     return "".join(ch for ch in norm if not unicodedata.combining(ch))
 
 def normalize_keyword(s: str) -> str:
-    """Performs robust keyword normalization."""
+    """Realiza una normalización robusta de la palabra clave."""
     if s is None:
         return ""
     s = str(s).strip()
@@ -90,14 +90,14 @@ def normalize_keyword(s: str) -> str:
     return s
 
 def normalize_series(series: pd.Series) -> pd.Series:
-    """Applies normalization to a pandas Series."""
+    """Aplica normalización a una Serie de pandas."""
     return series.astype("string").fillna("").map(normalize_keyword)
 
 # ------------------------
-# Embeddings
+# Embeddings (Vectores)
 # ------------------------
 def build_spacy_pipeline(lang_choice: str):
-    """Loads or downloads the specified spaCy model."""
+    """Carga o descarga el modelo de spaCy especificado."""
     spacy = _lazy_import_spacy()
     if not spacy:
         return None
@@ -112,7 +112,7 @@ def build_spacy_pipeline(lang_choice: str):
     try:
         return spacy.load(model_name)
     except Exception:
-        # try to download on the fly
+        # Intentar descargar al vuelo
         try:
             import subprocess, sys
             st.info(f"Descargando modelo spaCy '{model_name}'...")
@@ -122,17 +122,16 @@ def build_spacy_pipeline(lang_choice: str):
             return None
 
 def embed_spacy(texts: List[str], nlp) -> np.ndarray:
-    """Generates vectors using spaCy."""
+    """Genera vectores usando spaCy."""
     vecs = []
     for t in texts:
         doc = nlp(t)
         vecs.append(doc.vector)
     arr = np.vstack(vecs)
-    # If zero vectors (small models), fallback to TF-IDF later
     return arr
 
 def embed_tfidf(texts: List[str]) -> Tuple[np.ndarray, TfidfVectorizer]:
-    """Generates vectors using TF-IDF."""
+    """Genera vectores usando TF-IDF."""
     vec = TfidfVectorizer(ngram_range=(1,2), min_df=1)
     X = vec.fit_transform(texts)
     return X, vec
@@ -141,28 +140,33 @@ def embed_tfidf(texts: List[str]) -> Tuple[np.ndarray, TfidfVectorizer]:
 # Clustering
 # ------------------------
 def kmeans_cluster(X, k: int, random_state: int = 42) -> np.ndarray:
-    """Performs K-Means clustering."""
+    """Ejecuta K-Means."""
     model = KMeans(n_clusters=k, n_init=10, random_state=random_state)
     labels = model.fit_predict(X)
     return labels
 
 def try_auto_k(X, k_min=2, k_max=12) -> int:
-    """Finds optimal K using the Silhouette Score."""
+    """
+    Encuentra el K óptimo usando Silhouette Score.
+    CORREGIDO: Usa X.shape[0] para compatibilidad con matrices dispersas.
+    """
     best_k, best_score = None, -1
-    
-    # CORRECCIÓN: Usar X.shape[0] en lugar de len(X)
-    n_samples = X.shape[0]
-    
-    # Determine max K based on data size, up to 12
-    max_k_limit = min(k_max, max(3, n_samples // 5)) # [cite: 10]
-    
+
+    # --- CORRECCIÓN APLICADA AQUÍ ---
+    n_samples = X.shape[0] 
+    # --------------------------------
+
+    # Determinar límite de K basado en el tamaño de datos
+    max_k_limit = min(k_max, max(3, n_samples // 5))
+
     ks = list(range(k_min, max_k_limit + 1))
 
     for k in ks:
         try:
             labels = kmeans_cluster(X, k)
-            # Use appropriate metric for sparse (TF-IDF) or dense (spaCy) matrices
-            X_data = X if hasattr(X, "toarray") else X
+            # Usar X directo si es denso, o tal cual si es disperso (silhouette lo maneja si se pasa metric)
+            X_data = X
+            # Usamos cosine distance para texto
             score = silhouette_score(X_data, labels, metric="cosine")
             if score > best_score:
                 best_k, best_score = k, score
@@ -171,20 +175,20 @@ def try_auto_k(X, k_min=2, k_max=12) -> int:
     return best_k or 5
 
 # ------------------------
-# Gemini naming (optional)
+# Nombrado con Gemini (Opcional)
 # ------------------------
 def name_clusters_with_gemini(df: pd.DataFrame, api_key: str, lang: str) -> pd.DataFrame:
-    """Uses Gemini API to name clusters based on keywords."""
+    """Usa la API de Gemini para nombrar clústeres."""
     genai = _lazy_import_gemini()
     if not genai:
         st.warning("Paquete google-genai no disponible. Omite nombres de clúster.")
         return df
 
     try:
-        # Initialize Gemini Client
+        # Inicializar cliente Gemini
         client = genai.Client(api_key=api_key)
     except Exception as e:
-        st.error(f"Error al inicializar el cliente Gemini. Asegúrate de que la clave API es válida: {e}")
+        st.error(f"Error al inicializar cliente Gemini: {e}")
         return df
 
     prompts = {
@@ -208,10 +212,10 @@ Responda estritamente no formato **JSON** solicitado.
 """,
     }
 
-    # Simple language heuristic from UI choice
+    # Heurística simple de idioma basada en la selección de UI
     sys_lang = {"Auto": "en", "English": "en", "Español": "es", "Português": "pt"}.get(lang.split(" ")[0], "en")
-    
-    # System Instruction to enforce JSON output structure
+
+    # Instrucción del sistema
     system_instruction = f"""Actúa como un analista de datos experto. Tu única tarea es nombrar un grupo de palabras clave.
     Siempre debes responder en JSON. La estructura JSON requerida es:
     {{
@@ -220,7 +224,7 @@ Responda estritamente no formato **JSON** solicitado.
     }}
     La respuesta debe ser en idioma '{sys_lang}'."""
 
-    # Generation configuration to enforce JSON
+    # --- CORRECCIÓN APLICADA AQUÍ (Configuración Gemini) ---
     generation_config = {
         "response_mime_type": "application/json",
         "temperature": 0.2,
@@ -231,42 +235,46 @@ Responda estritamente no formato **JSON** solicitado.
                 "description": {"type": "STRING", "description": "One-sentence explanation of the cluster theme."}
             },
             "required": ["cluster_name", "description"]
-        }
+        },
+        # La instrucción del sistema va DENTRO de config en el nuevo SDK
+        "system_instruction": system_instruction
     }
+    # -------------------------------------------------------
 
     results = []
-    # Process clusters in parallel or sequentially (sequential for simple Streamlit app)
+    
+    # Procesar clústeres
     for cl_id, group in df.groupby("cluster_id"):
         kws = group["keyword_original"].head(15).tolist()
         kw_blob = ", ".join(kws)
         prompt = prompts[sys_lang].format(keywords=kw_blob)
 
         try:
-            # Call Gemini API
+            # Llamada a Gemini
             response = client.models.generate_content(
-                model='gemini-2.5-flash', # Fast and cost-effective model
+                model='gemini-2.5-flash',
                 contents=[prompt],
-                config=generation_config,
-                system_instruction=system_instruction
+                config=generation_config
+                # NOTA: system_instruction ya no se pasa aquí
             )
 
             content = response.text
             data = json.loads(content)
-            
+
             cluster_name = data.get("cluster_name") or f"Cluster {cl_id}"
             description = data.get("description") or ""
 
         except Exception as e:
             st.error(f"Error al nombrar el Clúster {cl_id} con Gemini: {e}")
             cluster_name, description = f"Cluster {cl_id}", "Error al generar la descripción."
-        
+
         results.append((cl_id, cluster_name, description))
 
     name_df = pd.DataFrame(results, columns=["cluster_id", "cluster_name", "cluster_description"])
     return df.merge(name_df, on="cluster_id", how="left")
 
 # ------------------------
-# UI
+# UI Principal
 # ------------------------
 st.set_page_config(page_title="Keyword Clustering (ES/EN/PT)", layout="wide")
 
@@ -286,7 +294,6 @@ with st.sidebar:
     do_dimred = st.checkbox("PCA 2D para visualización", value=True)
     use_gemini = st.checkbox("Nombrar clústeres con Gemini", value=False)
     if use_gemini:
-        # Updated key name to reflect Gemini API usage
         gemini_key = st.text_input("GEMINI_API_KEY", type="password", value=os.getenv("GEMINI_API_KEY", ""))
     else:
         gemini_key = ""
@@ -298,7 +305,7 @@ if uploaded is None:
     st.info("💡 Consejo: la columna debe llamarse `keyword`, `keywords`, `query` o `kw` (o será la primera columna).")
     st.stop()
 
-# Read CSV robustly
+# Lectura robusta del CSV
 try:
     df = pd.read_csv(uploaded, encoding="utf-8-sig", on_bad_lines="skip", dtype=str)
 except Exception:
@@ -309,7 +316,7 @@ df = df.fillna("")
 possible = [c for c in df.columns if c.lower() in {"keyword", "keywords", "query", "kw"}]
 kw_col = possible[0] if possible else df.columns[0]
 
-# Keep original and normalized
+# Crear columnas original y normalizada
 df["keyword_original"] = df[kw_col].astype("string")
 df["keyword_norm"] = normalize_series(df[kw_col])
 df = df[df["keyword_norm"].str.len() > 0].drop_duplicates(subset=["keyword_norm"]).reset_index(drop=True)
@@ -318,7 +325,7 @@ st.success(f"✅ CSV cargado. Usando columna: **{kw_col}** · Filas: **{len(df)}
 with st.expander("Ver muestra de normalización", expanded=False):
     st.dataframe(df[["keyword_original", "keyword_norm"]].head(20))
 
-# Build vectors
+# Construir Vectores
 texts = df["keyword_norm"].tolist()
 
 X = None
@@ -330,7 +337,7 @@ if embed_method == "spaCy vectors":
     if nlp is not None and nlp.vocab.vectors.shape[0] > 0:
         with st.spinner("Calculando vectores de spaCy..."):
             X = embed_spacy(texts, nlp)
-            # Some spaCy small models yield mostly-zero vectors; check variance
+            # Algunos modelos pequeños devuelven vectores ceros
             if np.allclose(X, 0):
                 st.warning("Los vectores de este modelo parecen nulos. Cambio a TF-IDF.")
                 X, vectorizer = embed_tfidf(texts)
@@ -340,19 +347,20 @@ if embed_method == "spaCy vectors":
 else:
     X, vectorizer = embed_tfidf(texts)
 
-# Decide K
+# Decidir K
 if auto_k:
     with st.spinner("Buscando K óptimo (silhouette)..."):
+        # try_auto_k ya incluye el fix de len(X) -> X.shape[0]
         k_auto = try_auto_k(X, k_min=2, k_max=min(12, max(3, len(df)//5)))
         if k_auto:
             k = k_auto
 st.write(f"**K seleccionado:** {k}")
 
-# Cluster
+# Clustering
 labels = kmeans_cluster(X, k)
 df["cluster_id"] = labels
 
-# Optional PCA visualization
+# Visualización PCA Opcional
 if do_dimred:
     st.markdown("### 2) Visualización 2D (PCA)")
     try:
@@ -363,27 +371,37 @@ if do_dimred:
         pca = PCA(n_components=2, random_state=42)
         coords = pca.fit_transform(X_dense)
         viz = pd.DataFrame({"x": coords[:,0], "y": coords[:,1], "cluster": df["cluster_id"], "keyword": df["keyword_original"]})
-        # Generate the scatter chart 
         st.scatter_chart(viz, x="x", y="y", color="cluster", size=None)
     except Exception as e:
         st.warning(f"No se pudo proyectar a 2D: {e}")
 
-# Optional Gemini naming
+# Nombrado con Gemini
 if use_gemini and gemini_key:
     with st.spinner("Nombrando clústeres con Gemini..."):
         df = name_clusters_with_gemini(df, api_key=gemini_key, lang=lang_choice)
 else:
+    # Inicializar vacíos si no se usa Gemini
     df["cluster_name"] = ""
     df["cluster_description"] = ""
 
-# Output
+# --- 🛡️ CORRECCIÓN APLICADA AQUÍ (BLINDAJE) ---
+# Si Gemini falló o devolvió el DF original, asegurarse de que las columnas existan
+if "cluster_name" not in df.columns:
+    df["cluster_name"] = "Sin nombre (Gemini omitido)"
+if "cluster_description" not in df.columns:
+    df["cluster_description"] = ""
+# ----------------------------------------------
+
+# Output Final
 st.markdown("### 3) Resultado")
 order_cols = ["keyword_original", "keyword_norm", "cluster_id", "cluster_name", "cluster_description"]
 extra_cols = [c for c in df.columns if c not in order_cols]
+# Ahora esto es seguro porque las columnas están garantizadas
 df = df[order_cols + extra_cols]
+
 st.dataframe(df)
 
 csv_bytes = df.to_csv(index=False).encode("utf-8")
 st.download_button("⬇️ Descargar CSV clusterizado", data=csv_bytes, file_name="clustered_keywords.csv", mime="text/csv")
 
-st.caption("Hecho para para es/en/pt · Normalización robusta para evitar fallos por caracteres/acentos.")
+st.caption("Hecho para para es/en/pt · Normalización robusta · Gemini API")
