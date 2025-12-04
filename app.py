@@ -7,7 +7,7 @@ Keyword Clustering App (ES/EN/PT) – GitHub-ready
 - Cross-language normalization (es/en/pt)
 - KMeans clustering
 - Optional spaCy embeddings (falls back to TF-IDF)
-- Cluster naming via OpenAI (optional)
+- Cluster naming via Google Gemini (new integration)
 """
 import os
 import re
@@ -26,18 +26,28 @@ from sklearn.decomposition import PCA
 
 # --- Optional deps (lazy import) ---
 def _lazy_import_spacy():
+    """Tries to import the spacy library."""
     try:
         import spacy
         return spacy
     except Exception:
         return None
 
-def _lazy_import_openai():
+def _lazy_import_gemini():
+    """Tries to import the google-genai library."""
     try:
-        from openai import OpenAI
-        return OpenAI
-    except Exception:
+        from google import genai
+        # Ensure that the necessary components are available (e.g., Client)
+        if hasattr(genai, 'Client'):
+            return genai
         return None
+    except ImportError:
+        # Fallback for common ImportError
+        return None
+    except Exception:
+        # Catch all other exceptions
+        return None
+
 
 # ------------------------
 # Normalization utilities
@@ -59,10 +69,12 @@ _ALLOWED_RE = re.compile(r"[^a-z0-9\-\' ]+")
 _MULTI_SPACE_RE = re.compile(r"\s+")
 
 def strip_diacritics(text: str) -> str:
+    """Removes diacritics (accents) from text."""
     norm = unicodedata.normalize("NFKD", text)
     return "".join(ch for ch in norm if not unicodedata.combining(ch))
 
 def normalize_keyword(s: str) -> str:
+    """Performs robust keyword normalization."""
     if s is None:
         return ""
     s = str(s).strip()
@@ -78,12 +90,14 @@ def normalize_keyword(s: str) -> str:
     return s
 
 def normalize_series(series: pd.Series) -> pd.Series:
+    """Applies normalization to a pandas Series."""
     return series.astype("string").fillna("").map(normalize_keyword)
 
 # ------------------------
 # Embeddings
 # ------------------------
 def build_spacy_pipeline(lang_choice: str):
+    """Loads or downloads the specified spaCy model."""
     spacy = _lazy_import_spacy()
     if not spacy:
         return None
@@ -101,12 +115,14 @@ def build_spacy_pipeline(lang_choice: str):
         # try to download on the fly
         try:
             import subprocess, sys
+            st.info(f"Descargando modelo spaCy '{model_name}'...")
             subprocess.run([sys.executable, "-m", "spacy", "download", model_name], check=True)
             return spacy.load(model_name)
         except Exception:
             return None
 
 def embed_spacy(texts: List[str], nlp) -> np.ndarray:
+    """Generates vectors using spaCy."""
     vecs = []
     for t in texts:
         doc = nlp(t)
@@ -116,6 +132,7 @@ def embed_spacy(texts: List[str], nlp) -> np.ndarray:
     return arr
 
 def embed_tfidf(texts: List[str]) -> Tuple[np.ndarray, TfidfVectorizer]:
+    """Generates vectors using TF-IDF."""
     vec = TfidfVectorizer(ngram_range=(1,2), min_df=1)
     X = vec.fit_transform(texts)
     return X, vec
@@ -124,22 +141,24 @@ def embed_tfidf(texts: List[str]) -> Tuple[np.ndarray, TfidfVectorizer]:
 # Clustering
 # ------------------------
 def kmeans_cluster(X, k: int, random_state: int = 42) -> np.ndarray:
-    if hasattr(X, "toarray"):
-        # sparse matrix
-        model = KMeans(n_clusters=k, n_init=10, random_state=random_state)
-        labels = model.fit_predict(X)
-    else:
-        model = KMeans(n_clusters=k, n_init=10, random_state=random_state)
-        labels = model.fit_predict(X)
+    """Performs K-Means clustering."""
+    model = KMeans(n_clusters=k, n_init=10, random_state=random_state)
+    labels = model.fit_predict(X)
     return labels
 
 def try_auto_k(X, k_min=2, k_max=12) -> int:
+    """Finds optimal K using the Silhouette Score."""
     best_k, best_score = None, -1
-    ks = list(range(k_min, max(k_min+1, k_max+1)))
+    # Determine max K based on data size, up to 12
+    max_k_limit = min(k_max, max(3, len(X)//5))
+    ks = list(range(k_min, max_k_limit + 1))
+
     for k in ks:
         try:
             labels = kmeans_cluster(X, k)
-            score = silhouette_score(X if hasattr(X, "toarray") else X, labels, metric="cosine")
+            # Use appropriate metric for sparse (TF-IDF) or dense (spaCy) matrices
+            X_data = X if hasattr(X, "toarray") else X
+            score = silhouette_score(X_data, labels, metric="cosine")
             if score > best_score:
                 best_k, best_score = k, score
         except Exception:
@@ -147,72 +166,95 @@ def try_auto_k(X, k_min=2, k_max=12) -> int:
     return best_k or 5
 
 # ------------------------
-# OpenAI naming (optional)
+# Gemini naming (optional)
 # ------------------------
-def name_clusters_with_openai(df: pd.DataFrame, api_key: str, lang: str) -> pd.DataFrame:
-    OpenAI = _lazy_import_openai()
-    if not OpenAI:
-        st.warning("Paquete openai no disponible. Omite nombres de clúster.")
+def name_clusters_with_gemini(df: pd.DataFrame, api_key: str, lang: str) -> pd.DataFrame:
+    """Uses Gemini API to name clusters based on keywords."""
+    genai = _lazy_import_gemini()
+    if not genai:
+        st.warning("Paquete google-genai no disponible. Omite nombres de clúster.")
         return df
-    client = OpenAI(api_key=api_key)
+
+    try:
+        # Initialize Gemini Client
+        client = genai.Client(api_key=api_key)
+    except Exception as e:
+        st.error(f"Error al inicializar el cliente Gemini. Asegúrate de que la clave API es válida: {e}")
+        return df
 
     prompts = {
         "en": """Given the following keywords, identify a common theme and return:
 1) A short cluster name (max. 5 words)
 2) A one-sentence description.
 Keywords: {keywords}
-Respond in **JSON** like:
-{{
-  "cluster_name": "Descriptive name",
-  "description": "Brief explanation of the category."
-}}""",
+Respond strictly in the requested **JSON** format.
+""",
         "es": """Dadas las siguientes palabras clave, identifica un tema común y devuelve:
 1) Un nombre corto para el grupo (máx. 5 palabras)
 2) Una breve descripción en una oración.
 Palabras clave: {keywords}
-Responde en **JSON** así:
-{{
-  "cluster_name": "Nombre descriptivo",
-  "description": "Breve explicación de la categoría."
-}}""",
+Responde estrictamente en el formato **JSON** solicitado.
+""",
         "pt": """Dadas as palavras-chave a seguir, identifique um tema comum e retorne:
 1) Um nome curto para o grupo (máx. 5 palavras)
 2) Uma breve descrição em uma frase.
 Palavras-chave: {keywords}
-Responda em **JSON** assim:
-{{
-  "cluster_name": "Nome descritivo",
-  "description": "Breve explicação da categoria."
-}}""",
+Responda estritamente no formato **JSON** solicitado.
+""",
     }
+
     # Simple language heuristic from UI choice
-    sys_lang = {"Auto": "en", "English": "en", "Español": "es", "Português": "pt"}.get(lang, "en")
+    sys_lang = {"Auto": "en", "English": "en", "Español": "es", "Português": "pt"}.get(lang.split(" ")[0], "en")
+    
+    # System Instruction to enforce JSON output structure
+    system_instruction = f"""Actúa como un analista de datos experto. Tu única tarea es nombrar un grupo de palabras clave.
+    Siempre debes responder en JSON. La estructura JSON requerida es:
+    {{
+      "cluster_name": "Nombre descriptivo",
+      "description": "Breve explicación de la categoría."
+    }}
+    La respuesta debe ser en idioma '{sys_lang}'."""
+
+    # Generation configuration to enforce JSON
+    generation_config = {
+        "response_mime_type": "application/json",
+        "temperature": 0.2,
+        "response_schema": {
+            "type": "OBJECT",
+            "properties": {
+                "cluster_name": {"type": "STRING", "description": "Short, descriptive name for the cluster (max 5 words)."},
+                "description": {"type": "STRING", "description": "One-sentence explanation of the cluster theme."}
+            },
+            "required": ["cluster_name", "description"]
+        }
+    }
+
     results = []
+    # Process clusters in parallel or sequentially (sequential for simple Streamlit app)
     for cl_id, group in df.groupby("cluster_id"):
         kws = group["keyword_original"].head(15).tolist()
         kw_blob = ", ".join(kws)
         prompt = prompts[sys_lang].format(keywords=kw_blob)
+
         try:
-            chat = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
+            # Call Gemini API
+            response = client.models.generate_content(
+                model='gemini-2.5-flash', # Fast and cost-effective model
+                contents=[prompt],
+                config=generation_config,
+                system_instruction=system_instruction
             )
-            content = chat.choices[0].message.content
-            # Try to parse JSON
-            data = {}
-            try:
-                data = json.loads(content)
-            except Exception:
-                # crude extraction of JSON-like
-                import re as _re
-                m = _re.search(r"\{.*\}", content, _re.S)
-                if m:
-                    data = json.loads(m.group(0))
+
+            content = response.text
+            data = json.loads(content)
+            
             cluster_name = data.get("cluster_name") or f"Cluster {cl_id}"
             description = data.get("description") or ""
-        except Exception:
-            cluster_name, description = f"Cluster {cl_id}", ""
+
+        except Exception as e:
+            st.error(f"Error al nombrar el Clúster {cl_id} con Gemini: {e}")
+            cluster_name, description = f"Cluster {cl_id}", "Error al generar la descripción."
+        
         results.append((cl_id, cluster_name, description))
 
     name_df = pd.DataFrame(results, columns=["cluster_id", "cluster_name", "cluster_description"])
@@ -224,7 +266,7 @@ Responda em **JSON** assim:
 st.set_page_config(page_title="Keyword Clustering (ES/EN/PT)", layout="wide")
 
 st.title("🔎 Keyword Clustering (ES · EN · PT)")
-st.caption("Carga tu CSV, normalizamos los términos y agrupamos por similitud. Listo para GitHub/Streamlit Cloud.")
+st.caption("Carga tu CSV, normalizamos los términos y agrupamos por similitud. Ahora impulsado por la API de Gemini.")
 
 with st.sidebar:
     st.header("⚙️ Configuración")
@@ -237,11 +279,12 @@ with st.sidebar:
     auto_k = st.checkbox("Elegir K automáticamente (silhouette)", value=True)
     k = st.slider("Número de clústeres (K)", 2, 30, 8)
     do_dimred = st.checkbox("PCA 2D para visualización", value=True)
-    use_openai = st.checkbox("Nombrar clústeres con OpenAI", value=False)
-    if use_openai:
-        openai_key = st.text_input("OPENAI_API_KEY", type="password", value=os.getenv("OPENAI_API_KEY", ""))
+    use_gemini = st.checkbox("Nombrar clústeres con Gemini", value=False)
+    if use_gemini:
+        # Updated key name to reflect Gemini API usage
+        gemini_key = st.text_input("GEMINI_API_KEY", type="password", value=os.getenv("GEMINI_API_KEY", ""))
     else:
-        openai_key = ""
+        gemini_key = ""
 
 st.markdown("### 1) Sube tu CSV de keywords")
 uploaded = st.file_uploader("CSV con columna de keywords", type=["csv"])
@@ -315,14 +358,15 @@ if do_dimred:
         pca = PCA(n_components=2, random_state=42)
         coords = pca.fit_transform(X_dense)
         viz = pd.DataFrame({"x": coords[:,0], "y": coords[:,1], "cluster": df["cluster_id"], "keyword": df["keyword_original"]})
+        # Generate the scatter chart 
         st.scatter_chart(viz, x="x", y="y", color="cluster", size=None)
     except Exception as e:
         st.warning(f"No se pudo proyectar a 2D: {e}")
 
-# Optional OpenAI naming
-if use_openai and openai_key:
-    with st.spinner("Nombrando clústeres con OpenAI..."):
-        df = name_clusters_with_openai(df, api_key=openai_key, lang="Auto")
+# Optional Gemini naming
+if use_gemini and gemini_key:
+    with st.spinner("Nombrando clústeres con Gemini..."):
+        df = name_clusters_with_gemini(df, api_key=gemini_key, lang=lang_choice)
 else:
     df["cluster_name"] = ""
     df["cluster_description"] = ""
@@ -337,4 +381,4 @@ st.dataframe(df)
 csv_bytes = df.to_csv(index=False).encode("utf-8")
 st.download_button("⬇️ Descargar CSV clusterizado", data=csv_bytes, file_name="clustered_keywords.csv", mime="text/csv")
 
-st.caption("Hecho con ❤️ para es/en/pt · Normalización robusta para evitar fallos por caracteres/acentos.")
+st.caption("Hecho para para es/en/pt · Normalización robusta para evitar fallos por caracteres/acentos.")
