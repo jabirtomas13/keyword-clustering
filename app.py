@@ -116,10 +116,11 @@ def build_spacy_pipeline(lang_choice: str):
         # Intentar descargar al vuelo
         try:
             import subprocess, sys
-            st.info(f"Descargando modelo spaCy '{model_name}'...")
+            st.info(f"Descargando modelo spaCy '{model_name}'... (esto puede tardar unos segundos)")
             subprocess.run([sys.executable, "-m", "spacy", "download", model_name], check=True)
             return spacy.load(model_name)
-        except Exception:
+        except Exception as e:
+            st.error(f"⚠️ Error detallado al descargar '{model_name}': {e}")
             return None
 
 def embed_spacy(texts: List[str], nlp) -> np.ndarray:
@@ -374,7 +375,19 @@ if embed_method == "spaCy vectors":
                 st.warning("Los vectores de este modelo parecen nulos. Cambio a TF-IDF.")
                 X, vectorizer = embed_tfidf(texts)
     else:
-        st.warning("No se pudo cargar un modelo de spaCy válido. Uso TF-IDF.")
+        # Mensaje de error más detallado y útil
+        st.warning("No se pudo cargar un modelo de spaCy válido. Usando TF-IDF como fallback.")
+        
+        # Mapa inverso para saber qué modelo falló exactamente
+        model_map = {
+            "auto-multi (xx)": "xx_ent_wiki_sm",
+            "english (en)": "en_core_web_md",
+            "español (es)": "es_core_news_md",
+            "português (pt)": "pt_core_news_md",
+        }
+        failed_model = model_map.get(lang_choice, "modelo_desconocido")
+        st.info(f"💡 Para solucionar esto en local, ejecuta en tu terminal:\n`python -m spacy download {failed_model}`")
+        
         X, vectorizer = embed_tfidf(texts)
 else:
     X, vectorizer = embed_tfidf(texts)
