@@ -149,8 +149,13 @@ def kmeans_cluster(X, k: int, random_state: int = 42) -> np.ndarray:
 def try_auto_k(X, k_min=2, k_max=12) -> int:
     """Finds optimal K using the Silhouette Score."""
     best_k, best_score = None, -1
+    
+    # CORRECCIÓN: Usar X.shape[0] en lugar de len(X)
+    n_samples = X.shape[0]
+    
     # Determine max K based on data size, up to 12
-    max_k_limit = min(k_max, max(3, len(X)//5))
+    max_k_limit = min(k_max, max(3, n_samples // 5)) # [cite: 10]
+    
     ks = list(range(k_min, max_k_limit + 1))
 
     for k in ks:
