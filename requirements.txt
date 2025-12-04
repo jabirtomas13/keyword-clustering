@@ -8,8 +8,12 @@ nltk
 spacy==3.7.2
 thinc==8.2.2
 google-genai
+sentence-transformers
 
-# Modelos de SpaCy (Instalación directa desde URL)
+Modelos de SpaCy (Instalación directa desde URL)
+
+Estos enlaces permiten a pip instalar los modelos como paquetes de Python
+
 https://github.com/explosion/spacy-models/releases/download/es_core_news_sm-3.7.0/es_core_news_sm-3.7.0-py3-none-any.whl
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
 https://github.com/explosion/spacy-models/releases/download/pt_core_news_sm-3.7.0/pt_core_news_sm-3.7.0-py3-none-any.whl
