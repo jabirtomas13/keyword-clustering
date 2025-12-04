@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Keyword Clustering App (ES/EN/PT) – SEO & EEAT Edition
-------------------------------------------------------
-Esta versión incluye las mejoras solicitadas para:
-1. Embeddings Semánticos Profundos (SBERT) para entender la intención real.
-2. Prompt de Gemini especializado en EEAT y Content Pillars.
+Keyword Clustering App – SEO & EEAT High-End UI Edition
+-------------------------------------------------------
+Integración completa:
+1. UX/UI Moderna (CSS, Tabs, Status Containers).
+2. Lógica SEO Avanzada (SBERT Embeddings, Gemini EEAT Prompt).
 """
 import os
 import re
@@ -23,8 +23,25 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.decomposition import PCA
 
-# --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="SEO Content Clusterizer (EEAT)", layout="wide")
+# --- CONFIGURACIÓN DE PÁGINA (UI) ---
+st.set_page_config(
+    page_title="SEO Content Clusterizer (EEAT)",
+    page_icon="🧠",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# --- ESTILOS CSS PERSONALIZADOS ---
+st.markdown("""
+    <style>
+    .main { background-color: #f8f9fa; }
+    .stButton>button { border-radius: 8px; font-weight: 600; text-transform: none; padding: 0.5rem 1rem; }
+    .stButton>button[kind="primary"] { background-color: #ff4b4b; border: none; box-shadow: 0 4px 14px 0 rgba(255, 75, 75, 0.39); }
+    h1, h2, h3 { font-family: 'Inter', sans-serif; color: #0e1117; }
+    .stMetric { background-color: white; padding: 15px; border-radius: 10px; border: 1px solid #e0e0e0; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+    div[data-testid="stStatusWidget"] { border-radius: 10px; }
+    </style>
+""", unsafe_allow_html=True)
 
 # ------------------------
 # Imports perezosos (Lazy Imports)
@@ -56,7 +73,6 @@ def _lazy_import_gemini():
         return None
     except Exception:
         return None
-
 
 # ------------------------
 # Utilidades de Normalización
@@ -93,8 +109,9 @@ def normalize_series(series: pd.Series) -> pd.Series:
     return series.astype("string").fillna("").map(normalize_keyword)
 
 # ------------------------
-# Embeddings: SpaCy & SBERT (El motor semántico)
+# Embeddings: SpaCy & SBERT
 # ------------------------
+@st.cache_resource
 def build_spacy_pipeline(lang_choice: str):
     spacy = _lazy_import_spacy()
     if not spacy: return None
@@ -117,7 +134,7 @@ def build_spacy_pipeline(lang_choice: str):
         except OSError: pass
         try:
             import subprocess, sys
-            st.info(f"⬇️ Descargando modelo spaCy '{name}'...")
+            # Solo intentamos descargar si es estrictamente necesario y permitido
             subprocess.run([sys.executable, "-m", "spacy", "download", name], check=True)
             return spacy.load(name)
         except Exception: return None
@@ -125,56 +142,38 @@ def build_spacy_pipeline(lang_choice: str):
     nlp = _load(target)
     if nlp: return nlp
     if fallback and fallback != target:
-        st.warning(f"⚠️ Falló '{target}'. Intentando '{fallback}'...")
         nlp = _load(fallback)
         if nlp: return nlp
-    st.error("❌ Fallo crítico en spaCy. Se usará TF-IDF.")
     return None
 
 def embed_spacy(texts: List[str], nlp) -> np.ndarray:
-    vecs = []
-    bar = st.progress(0)
-    tot = len(texts)
-    for i, t in enumerate(texts):
-        if i % 50 == 0: bar.progress((i+1)/tot)
-        vecs.append(nlp(t).vector)
-    bar.empty()
+    vecs = [nlp(t).vector for t in texts]
     return np.vstack(vecs)
 
-def embed_sbert(texts: List[str]) -> Optional[np.ndarray]:
-    """Genera embeddings contextuales profundos usando Sentence Transformers."""
+@st.cache_resource
+def get_sbert_model():
     STClass = _lazy_import_sbert()
-    if not STClass:
-        st.error("❌ Librería 'sentence-transformers' no instalada.")
-        st.info("💡 Ejecuta: `pip install sentence-transformers`")
-        return None
+    if not STClass: return None
+    return STClass('all-MiniLM-L6-v2')
 
-    # Modelo ligero pero muy potente para semántica multilingüe
-    model_name = 'all-MiniLM-L6-v2'
-    try:
-        with st.spinner(f"⏳ Cargando modelo SBERT ({model_name})... la primera vez tarda un poco."):
-            model = STClass(model_name)
-            embeddings = model.encode(texts, show_progress_bar=True)
-            return embeddings
-    except Exception as e:
-        st.error(f"Error cargando SBERT: {e}")
-        return None
+def embed_sbert(texts: List[str]) -> Optional[np.ndarray]:
+    model = get_sbert_model()
+    if not model: return None
+    return model.encode(texts, show_progress_bar=False)
 
 def embed_tfidf(texts: List[str]) -> Tuple[np.ndarray, TfidfVectorizer]:
     vec = TfidfVectorizer(ngram_range=(1,2), min_df=1)
-    X = vec.fit_transform(texts)
-    return X, vec
+    return vec.fit_transform(texts), vec
 
 # ------------------------
 # Clustering
 # ------------------------
 def kmeans_cluster(X, k: int, random_state: int = 42) -> np.ndarray:
     model = KMeans(n_clusters=k, n_init=10, random_state=random_state)
-    labels = model.fit_predict(X)
-    return labels
+    return model.fit_predict(X)
 
 def try_auto_k(X, k_min=2, k_max=12) -> int:
-    best_k, best_score = None, -1
+    best_k, best_score = 5, -1
     n_samples = X.shape[0]
     max_k_limit = min(k_max, max(3, n_samples // 5))
     ks = list(range(k_min, max_k_limit + 1))
@@ -182,61 +181,54 @@ def try_auto_k(X, k_min=2, k_max=12) -> int:
     for k in ks:
         try:
             labels = kmeans_cluster(X, k)
-            # Conversión segura para silhouette
             X_data = X.toarray() if hasattr(X, "toarray") else X
             score = silhouette_score(X_data, labels, metric="cosine")
             if score > best_score:
                 best_k, best_score = k, score
-        except Exception:
-            continue
-    return best_k or 5
+        except Exception: continue
+    return best_k
 
 # ------------------------
 # Nombrado con Gemini (SEO Expert Mode - EEAT)
 # ------------------------
 def name_clusters_seo_mode(df: pd.DataFrame, api_key: str, lang: str) -> pd.DataFrame:
     genai = _lazy_import_gemini()
-    if not genai:
-        st.warning("Google GenAI no disponible.")
-        return df
+    if not genai: return df
 
     try:
         client = genai.Client(api_key=api_key)
-    except Exception as e:
-        st.error(f"Error Gemini Auth: {e}")
-        return df
+    except Exception: return df
 
-    # Configuración de idioma y prompt
     sys_lang = {"Auto": "en", "English": "en", "Español": "es", "Português": "pt"}.get(lang.split(" ")[0], "en")
-
-    # PROMPT AVANZADO PARA EEAT / GEN AI
+    
+    # Prompt EEAT optimizado
     seo_prompts = {
-        "es": """Actúa como un Experto SEO Senior especializado en EEAT y Generative AI.
-        Analiza el siguiente grupo de keywords.
-        Tu objetivo es definir la estrategia para un 'Pilar de Contenido' de alta autoridad.
+        "es": """Actúa como un Experto SEO Senior (EEAT).
+        Analiza este grupo de keywords.
+        Objetivo: Definir un 'Pilar de Contenido' de autoridad.
 
         Keywords: {keywords}
 
-        Devuelve SOLO un JSON con:
-        1. "cluster_name": Título H1 optimizado para el artículo pilar (máx 6 palabras).
-        2. "user_intent": El objetivo real del usuario (ej: 'Informacional - Resolver problema técnico', 'Transaccional - Comprar software').
-        3. "content_angle": En una frase, ¿cuál es el enfoque único para ganar autoridad en este tema?
+        Responde SOLO JSON:
+        1. "cluster_name": Título H1 optimizado (máx 6 palabras).
+        2. "user_intent": Intención exacta (ej: 'Informacional - Tutorial', 'Transaccional - Compra').
+        3. "content_angle": Frase corta con el enfoque único para ganar autoridad.
         """,
-        "en": """Act as a Senior SEO Expert specialized in EEAT and GenAI.
+        "en": """Act as a Senior SEO Expert (EEAT).
         Analyze this keyword cluster.
-        Your goal is to define a strategy for a high-authority 'Content Pillar'.
+        Goal: Define a high-authority 'Content Pillar'.
 
         Keywords: {keywords}
 
-        Return ONLY JSON with:
-        1. "cluster_name": Optimized H1 Title for the pillar page (max 6 words).
-        2. "user_intent": The specific user intent (e.g., 'Informational - Troubleshooting', 'Transactional - Buying Guide').
-        3. "content_angle": One sentence on the unique angle to establish authority.
+        Return ONLY JSON:
+        1. "cluster_name": Optimized H1 Title (max 6 words).
+        2. "user_intent": Specific intent (e.g., 'Informational - How-to', 'Transactional - Buy').
+        3. "content_angle": Short sentence on the unique authority angle.
         """
     }
-
+    
     prompt_tmpl = seo_prompts.get(sys_lang, seo_prompts["en"])
-
+    
     gen_config = {
         "response_mime_type": "application/json",
         "temperature": 0.2,
@@ -253,20 +245,21 @@ def name_clusters_seo_mode(df: pd.DataFrame, api_key: str, lang: str) -> pd.Data
 
     results = []
     groups = list(df.groupby("cluster_id"))
-    total = len(groups)
-
-    bar = st.progress(0)
-    status = st.empty()
+    total_gr = len(groups)
+    
+    # Progress bar específico para Gemini dentro del status container principal
+    prog_text = "🧠 Analizando intención con Gemini..."
+    my_bar = st.progress(0, text=prog_text)
 
     for i, (cid, group) in enumerate(groups):
-        if i > 0: time.sleep(2) # Rate limit suave
-        bar.progress((i+1)/total)
-        status.text(f"Analizando Cluster {cid} con enfoque SEO (EEAT)...")
+        my_bar.progress((i+1)/total_gr, text=f"{prog_text} ({i+1}/{total_gr})")
+        if i > 0: time.sleep(1) # Rate limit preventivo
 
-        kws = group["keyword_original"].head(20).tolist()
+        kws = group["keyword_original"].head(15).tolist()
         prompt = prompt_tmpl.format(keywords=", ".join(kws))
-
-        c_name, c_intent, c_angle = f"Cluster {cid}", "N/A", "N/A"
+        
+        # Default
+        c_vals = (f"Cluster {cid}", "N/A", "N/A")
 
         for attempt in range(2):
             try:
@@ -275,158 +268,212 @@ def name_clusters_seo_mode(df: pd.DataFrame, api_key: str, lang: str) -> pd.Data
                     contents=[prompt],
                     config=gen_config
                 )
-                data = json.loads(resp.text)
-                c_name = data.get("cluster_name", c_name)
-                c_intent = data.get("user_intent", "")
-                c_angle = data.get("content_angle", "")
+                d = json.loads(resp.text)
+                c_vals = (d.get("cluster_name", c_vals[0]), d.get("user_intent", ""), d.get("content_angle", ""))
                 break
             except Exception as e:
                 if "429" in str(e) and attempt == 0:
-                    time.sleep(5)
+                    time.sleep(4)
                     continue
-                else:
-                    break
+                else: break
+        
+        results.append((cid,) + c_vals)
 
-        results.append((cid, c_name, c_intent, c_angle))
-
-    bar.empty()
-    status.empty()
-
+    my_bar.empty()
     res_df = pd.DataFrame(results, columns=["cluster_id", "cluster_name", "user_intent", "content_angle"])
     return df.merge(res_df, on="cluster_id", how="left")
 
-# ------------------------
-# UI Principal
-# ------------------------
-st.title("🧠 SEO Content Clusterizer (EEAT & GenAI Ready)")
-st.markdown("""
-Esta herramienta agrupa keywords basándose en **intención semántica profunda** (SBERT) y utiliza AI para definir pilares de contenido de alta autoridad.
-""")
+# ==============================================================================
+# INTERFAZ DE USUARIO PRINCIPAL (UI)
+# ==============================================================================
 
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("⚙️ Configuración")
-
+    
+    st.markdown("### 1. Motor de Embeddings")
     embed_method = st.radio(
-        "Tecnología de Embeddings",
-        ["SBERT (Alta Calidad - Recomendado)", "spaCy vectors (Rápido)", "TF-IDF (Básico)"],
+        "Tecnología",
+        ["SBERT (Recomendado)", "spaCy (Rápido)", "TF-IDF (Básico)"],
         index=0,
-        help="SBERT entiende el contexto completo de la frase, ideal para distinguir intenciones."
+        help="SBERT ofrece la mejor comprensión semántica para agrupar intenciones de búsqueda."
     )
-
+    
     lang_choice = "auto-multi (xx)"
-    if embed_method == "spaCy vectors (Rápido)":
+    if embed_method == "spaCy (Rápido)":
         lang_choice = st.selectbox("Idioma spaCy", ["auto-multi (xx)", "english (en)", "español (es)", "português (pt)"])
 
-    auto_k = st.checkbox("K Automático (Silhouette)", value=True)
-    k = st.slider("Clusters Manuales (K)", 2, 50, 10)
+    st.markdown("---")
+    st.markdown("### 2. Parámetros Clustering")
+    auto_k = st.toggle("Detectar K Automático", value=True)
+    k_val = st.slider("Número de Clústeres (K)", 2, 50, 10, disabled=auto_k)
 
-    st.divider()
-    use_gemini = st.checkbox("Análisis SEO con Gemini", value=False)
+    st.markdown("---")
+    st.markdown("### 3. Inteligencia Artificial (EEAT)")
+    use_gemini = st.toggle("Activar Gemini AI Analysis", value=False)
     gemini_key = ""
     if use_gemini:
-        gemini_key = st.text_input("GEMINI_API_KEY", type="password", value=os.getenv("GEMINI_API_KEY", ""))
+        gemini_key = st.text_input("Gemini API Key", type="password", help="Necesaria para generar la estrategia de contenido.")
+        if not gemini_key:
+            st.warning("⚠️ Se requiere API Key")
 
-st.markdown("### 1) Sube Data")
-uploaded = st.file_uploader("CSV Keywords", type=["csv"])
+# --- ÁREA PRINCIPAL ---
+col_head1, col_head2 = st.columns([3, 1])
+with col_head1:
+    st.title("SEO Content Clusterizer")
+    st.caption("Agrupación semántica avanzada & Estrategia EEAT con GenAI")
 
-if not uploaded:
-    st.info("Sube un CSV con una columna llamada `keyword`.")
-    st.stop()
+with col_head2:
+    # Espacio para branding o estado
+    st.write("")
 
-# Carga CSV
-try:
-    df = pd.read_csv(uploaded, encoding="utf-8-sig", on_bad_lines="skip", dtype=str)
-except:
-    uploaded.seek(0)
-    df = pd.read_csv(uploaded, encoding="latin-1", on_bad_lines="skip", dtype=str)
+st.markdown("---")
 
-df = df.fillna("")
-pos = [c for c in df.columns if c.lower() in {"keyword", "keywords", "query", "kw"}]
-kw_col = pos[0] if pos else df.columns[0]
-df["keyword_original"] = df[kw_col].astype("string")
-df["keyword_norm"] = normalize_series(df[kw_col])
-df = df[df["keyword_norm"].str.len() > 0].drop_duplicates(subset=["keyword_norm"]).reset_index(drop=True)
+# --- FILE UPLOADER & PREVIEW ---
+uploaded_file = st.file_uploader("Sube tu archivo de keywords (CSV)", type=["csv"])
 
-st.success(f"Procesando **{len(df)}** keywords.")
+if uploaded_file:
+    # 1. Previsualización rápida
+    try:
+        df_raw = pd.read_csv(uploaded_file, encoding="utf-8-sig", on_bad_lines="skip", dtype=str)
+    except:
+        uploaded_file.seek(0)
+        df_raw = pd.read_csv(uploaded_file, encoding="latin-1", on_bad_lines="skip", dtype=str)
 
-# ------------------------
-# Generación de Embeddings
-# ------------------------
-texts = df["keyword_norm"].tolist()
-X = None
+    # Detectar columna
+    pos = [c for c in df_raw.columns if c.lower() in {"keyword", "keywords", "query", "kw"}]
+    target_col = pos[0] if pos else df_raw.columns[0]
 
-if "SBERT" in embed_method:
-    X = embed_sbert(texts)
-    if X is None:
-        st.warning("⚠️ Falló SBERT. Cayendo a TF-IDF.")
-        X, _ = embed_tfidf(texts)
+    # Panel de Info y Acción
+    c1, c2, c3 = st.columns([1, 1, 2])
+    with c1:
+        st.metric("Keywords detectadas", len(df_raw))
+    with c2:
+        st.metric("Columna Objetivo", target_col)
+    with c3:
+        st.write("")
+        btn_run = st.button("🚀 Ejecutar Análisis SEO", type="primary", use_container_width=True)
 
-elif "spaCy" in embed_method:
-    nlp = build_spacy_pipeline(lang_choice)
-    if nlp:
-        with st.spinner("Vectorizando con spaCy..."):
-            X = embed_spacy(texts, nlp)
-            if np.allclose(X, 0): X, _ = embed_tfidf(texts)
-    else:
-        X, _ = embed_tfidf(texts)
+    # --- LÓGICA DE EJECUCIÓN ---
+    if btn_run:
+        start_time = time.time()
+        
+        # Contenedor de estado expandible
+        with st.status("Procesando tu estrategia de contenidos...", expanded=True) as status:
+            
+            # PASO 1: Normalización
+            st.write("🧹 Limpiando y normalizando keywords...")
+            df = df_raw.fillna("")
+            df["keyword_original"] = df[target_col].astype("string")
+            df["keyword_norm"] = normalize_series(df[target_col])
+            df = df[df["keyword_norm"].str.len() > 0].drop_duplicates(subset=["keyword_norm"]).reset_index(drop=True)
+            
+            # PASO 2: Embeddings
+            st.write(f"🧬 Generando embeddings semánticos con {embed_method}...")
+            texts = df["keyword_norm"].tolist()
+            X = None
+            
+            if "SBERT" in embed_method:
+                X = embed_sbert(texts)
+                if X is None:
+                    st.warning("⚠️ SBERT no disponible, usando TF-IDF.")
+                    X, _ = embed_tfidf(texts)
+            elif "spaCy" in embed_method:
+                nlp = build_spacy_pipeline(lang_choice)
+                if nlp:
+                    X = embed_spacy(texts, nlp)
+                    if np.allclose(X, 0): X, _ = embed_tfidf(texts)
+                else:
+                    X, _ = embed_tfidf(texts)
+            else:
+                X, _ = embed_tfidf(texts)
+
+            # PASO 3: Clustering
+            st.write("🧩 Agrupando temas (Clustering)...")
+            if auto_k:
+                limit = min(20, max(3, len(df)//3))
+                final_k = try_auto_k(X, k_max=limit)
+                st.info(f"K óptimo detectado: {final_k} clusters")
+            else:
+                final_k = k_val
+            
+            df["cluster_id"] = kmeans_cluster(X, final_k)
+            
+            # PASO 4: Gemini SEO
+            if use_gemini and gemini_key:
+                st.write("✨ Consultando a Gemini para estrategia EEAT...")
+                df = name_clusters_seo_mode(df, gemini_key, lang_choice)
+            else:
+                df["cluster_name"] = "Cluster " + df["cluster_id"].astype(str)
+                df["user_intent"] = "-"
+                df["content_angle"] = "-"
+            
+            status.update(label="¡Análisis completado exitosamente!", state="complete", expanded=False)
+
+        # --- RESULTADOS (TABS) ---
+        st.divider()
+        st.markdown("### 📊 Estrategia Generada")
+        
+        tab_strategy, tab_viz, tab_stats = st.tabs(["📝 Estrategia de Contenidos", "🗺️ Mapa Semántico", "📈 Estadísticas"])
+
+        with tab_strategy:
+            # Dataframe Principal formateado para lectura SEO
+            cols_show = ["cluster_name", "user_intent", "content_angle", "keyword_original"]
+            final_df = df.sort_values(["cluster_id"])[cols_show]
+            
+            st.dataframe(
+                final_df,
+                column_config={
+                    "cluster_name": st.column_config.TextColumn("Pilar de Contenido (H1)", help="Título optimizado para el cluster"),
+                    "user_intent": st.column_config.TextColumn("Intención de Usuario", width="medium"),
+                    "content_angle": st.column_config.TextColumn("Ángulo de Autoridad (EEAT)", width="large"),
+                    "keyword_original": st.column_config.ListColumn("Keywords Agrupadas")
+                },
+                use_container_width=True,
+                height=500
+            )
+            
+            # Botón Descarga
+            csv = df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "⬇️ Descargar Estrategia Completa (CSV)",
+                csv,
+                "seo_content_strategy.csv",
+                "text/csv",
+                type="primary"
+            )
+
+        with tab_viz:
+            st.markdown("#### Visualización de Proximidad (PCA)")
+            try:
+                X_dense = X.toarray() if hasattr(X, "toarray") else X
+                pca = PCA(n_components=2, random_state=42)
+                coords = pca.fit_transform(X_dense)
+                viz_df = pd.DataFrame({
+                    "x": coords[:,0], "y": coords[:,1],
+                    "Pilar": df["cluster_name"],
+                    "Keyword": df["keyword_original"]
+                })
+                st.scatter_chart(viz_df, x="x", y="y", color="Pilar", height=500, use_container_width=True)
+            except Exception:
+                st.warning("No hay suficientes datos para visualizar el mapa 2D.")
+
+        with tab_stats:
+            c_s1, c_s2 = st.columns(2)
+            with c_s1:
+                st.markdown("**Distribución de Keywords por Pilar**")
+                counts = df["cluster_name"].value_counts()
+                st.bar_chart(counts)
+            with c_s2:
+                st.markdown("**Métricas Globales**")
+                st.metric("Total Clusters", final_k)
+                st.metric("Promedio Keywords/Cluster", f"{len(df)/final_k:.1f}")
+
 else:
-    X, _ = embed_tfidf(texts)
-
-# ------------------------
-# Clustering & Análisis
-# ------------------------
-if auto_k:
-    with st.spinner("Calculando coherencia de tópicos (K óptimo)..."):
-        # Ajuste de K máximo según cantidad de datos
-        limit = min(20, max(3, len(df)//3))
-        k = try_auto_k(X, k_min=3, k_max=limit)
-st.metric("Clusters Identificados", k)
-
-df["cluster_id"] = kmeans_cluster(X, k)
-
-# Visualización
-st.markdown("### 2) Mapa de Intenciones (2D)")
-try:
-    X_dense = X.toarray() if hasattr(X, "toarray") else X
-    pca = PCA(n_components=2, random_state=42)
-    coords = pca.fit_transform(X_dense)
-    viz = pd.DataFrame({
-        "x": coords[:,0], "y": coords[:,1],
-        "cluster": df["cluster_id"],
-        "keyword": df["keyword_original"]
-    })
-    st.scatter_chart(viz, x="x", y="y", color="cluster")
-except Exception as e:
-    st.write("Datos insuficientes para visualizar.")
-
-# Gemini SEO Analysis
-if use_gemini and gemini_key:
-    # LLAMADA CLAVE PARA EEAT
-    df = name_clusters_seo_mode(df, gemini_key, "Español") 
-else:
-    df["cluster_name"] = "Cluster " + df["cluster_id"].astype(str)
-    df["user_intent"] = ""
-    df["content_angle"] = ""
-
-# Output
-st.markdown("### 3) Estrategia de Contenidos (EEAT)")
-cols = ["cluster_id", "cluster_name", "user_intent", "content_angle", "keyword_original"]
-final_df = df[cols].sort_values(["cluster_id"])
-
-st.dataframe(
-    final_df,
-    column_config={
-        "cluster_name": st.column_config.TextColumn("Pilar de Contenido (H1)"),
-        "user_intent": st.column_config.TextColumn("Intención"),
-        "content_angle": st.column_config.TextColumn("Enfoque de Autoridad"),
-        "keyword_original": st.column_config.ListColumn("Keywords")
-    },
-    use_container_width=True
-)
-
-st.download_button(
-    "⬇️ Descargar Estrategia CSV",
-    final_df.to_csv(index=False).encode("utf-8"),
-    "seo_strategy_clusters.csv",
-    "text/csv"
-)
+    # Empty State (UX)
+    st.markdown("""
+    <div style='text-align: center; padding: 4rem; color: #666;'>
+        <h3>👋 Bienvenido al SEO Clusterizer</h3>
+        <p>Sube tu archivo CSV para comenzar a detectar oportunidades de contenido.</p>
+    </div>
+    """, unsafe_allow_html=True)
